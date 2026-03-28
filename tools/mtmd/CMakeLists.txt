@@ -155,7 +155,7 @@ if (LLAMA_BUILD_TOOLS)
     target_compile_features(llama-mtmd-debug PRIVATE cxx_std_17)
 
     set(TARGET llama-vl-embedding)
-    add_executable(${TARGET} ../../examples/embedding/vl-embedding.cpp)
+    add_executable(${TARGET} vl-embedding.cpp)
     if(LLAMA_TOOLS_INSTALL)
         install(TARGETS ${TARGET} RUNTIME)
     endif()
