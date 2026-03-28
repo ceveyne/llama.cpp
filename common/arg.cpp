@@ -62,6 +62,7 @@ static std::initializer_list<enum llama_example> mmproj_examples = {
     LLAMA_EXAMPLE_SERVER,
     LLAMA_EXAMPLE_CLI,
     LLAMA_EXAMPLE_TTS,
+    LLAMA_EXAMPLE_EMBEDDING,
 };
 
 static std::string read_file(const std::string & fname) {
@@ -1741,6 +1742,25 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
         }
     ).set_excludes({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--inputs"}, "JSON",
+        "JSON array input for multimodal embedding frontends",
+        [](common_params & params, const std::string & value) {
+            params.inputs_json = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_EMBEDDING}));
+    add_opt(common_arg(
+        {"--inputs-file"}, "FNAME",
+        "file containing a JSON array input for multimodal embedding frontends",
+        [](common_params & params, const std::string & value) {
+            params.inputs_file = read_file(value);
+            params.inputs_json = params.inputs_file;
+            if (!params.inputs_json.empty() && params.inputs_json.back() == '\n') {
+                params.inputs_json.pop_back();
+            }
+            params.inputs_file = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_EMBEDDING}));
     add_opt(common_arg(
         {"-sysf", "--system-prompt-file"}, "FNAME",
         "a file containing the system prompt (default: none)",
