@@ -310,6 +310,14 @@ int32_t mtmd_helper_decode_image_chunk(
             return ret;
         }
 
+        // Ensure any async GPU->CPU embedding copy triggered by this decode() call
+        // (e.g. into llama_context::embd_seq) has fully completed before the next
+        // decode() call clears/reuses that buffer, or before the callback below
+        // reads the just-decoded embeddings. Without this, a non-CPU backend
+        // (Metal/CUDA) can race: the next decode()'s embd_seq.clear() frees memory
+        // that this decode()'s async tensor copy may still be writing to.
+        llama_synchronize(lctx);
+
         if (callback != nullptr) {
             ret = callback(batch_embd_view, user_data);
             if (ret != 0) {
@@ -375,6 +383,9 @@ int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
                 llama_batch_free(text_batch);
                 return ret;
             }
+            // See comment in the image/audio decode loop above: synchronize before
+            // any subsequent decode() call can clear/reuse this call's embd_seq buffer.
+            llama_synchronize(lctx);
             *new_n_past += text_batch.n_tokens;
         }
 
