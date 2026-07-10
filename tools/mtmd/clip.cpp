@@ -143,6 +143,165 @@ static void clip_image_convert_f32_to_u8(const clip_image_f32& src, clip_image_u
 }
 #endif
 
+static std::vector<float> qwen3vl_fast_pos_embed_interpolate(
+        const ggml_tensor * pos_embd,
+        const int grid_h,
+        const int grid_w,
+        const int merge_size) {
+    GGML_ASSERT(pos_embd != nullptr);
+    GGML_ASSERT(pos_embd->ne[0] > 0);
+    GGML_ASSERT(pos_embd->ne[1] > 0);
+    GGML_ASSERT(grid_h > 0);
+    GGML_ASSERT(grid_w > 0);
+    GGML_ASSERT(grid_h % merge_size == 0);
+    GGML_ASSERT(grid_w % merge_size == 0);
+
+    const int n_embd = pos_embd->ne[0];
+    const int num_grid_per_side = (int) std::sqrt((double) pos_embd->ne[1]);
+    GGML_ASSERT(num_grid_per_side * num_grid_per_side == pos_embd->ne[1]);
+
+    // The position embedding tensor may be offloaded to a device backend.
+    // Fetch it into host memory once before interpolating.
+    std::vector<float> pos_embd_host(ggml_nelements(pos_embd));
+    switch (pos_embd->type) {
+        case GGML_TYPE_F32:
+            ggml_backend_tensor_get(pos_embd, pos_embd_host.data(), 0, ggml_nbytes(pos_embd));
+            break;
+        case GGML_TYPE_F16: {
+            std::vector<ggml_fp16_t> raw(ggml_nelements(pos_embd));
+            ggml_backend_tensor_get(pos_embd, raw.data(), 0, ggml_nbytes(pos_embd));
+            ggml_fp16_to_fp32_row(raw.data(), pos_embd_host.data(), raw.size());
+        } break;
+        case GGML_TYPE_BF16: {
+            std::vector<ggml_bf16_t> raw(ggml_nelements(pos_embd));
+            ggml_backend_tensor_get(pos_embd, raw.data(), 0, ggml_nbytes(pos_embd));
+            ggml_bf16_to_fp32_row(raw.data(), pos_embd_host.data(), raw.size());
+        } break;
+        default:
+            GGML_ABORT("%s: unsupported position embedding type %s", __func__, ggml_type_name(pos_embd->type));
+    }
+
+    auto pos_at = [&](const int embd_idx, const int pos_idx) -> float {
+        return pos_embd_host[(size_t) pos_idx * n_embd + embd_idx];
+    };
+
+    auto linspace_coord = [num_grid_per_side](const int idx, const int count) -> float {
+        if (count <= 1) {
+            return 0.0f;
+        }
+        return ((float) idx * (float) (num_grid_per_side - 1)) / (float) (count - 1);
+    };
+
+    std::vector<float> patch_pos_embd(grid_h * grid_w * n_embd);
+    for (int y = 0; y < grid_h; ++y) {
+        const float yf = linspace_coord(y, grid_h);
+        const int y0 = std::floor(yf);
+        const int y1 = std::min(y0 + 1, num_grid_per_side - 1);
+        const float dy = yf - (float) y0;
+
+        for (int x = 0; x < grid_w; ++x) {
+            const float xf = linspace_coord(x, grid_w);
+            const int x0 = std::floor(xf);
+            const int x1 = std::min(x0 + 1, num_grid_per_side - 1);
+            const float dx = xf - (float) x0;
+
+            const int idx00 = y0 * num_grid_per_side + x0;
+            const int idx01 = y0 * num_grid_per_side + x1;
+            const int idx10 = y1 * num_grid_per_side + x0;
+            const int idx11 = y1 * num_grid_per_side + x1;
+
+            const float w00 = (1.0f - dy) * (1.0f - dx);
+            const float w01 = (1.0f - dy) * dx;
+            const float w10 = dy * (1.0f - dx);
+            const float w11 = dy * dx;
+
+            float * dst = patch_pos_embd.data() + (y * grid_w + x) * n_embd;
+            for (int i = 0; i < n_embd; ++i) {
+                dst[i] = w00 * pos_at(i, idx00)
+                       + w01 * pos_at(i, idx01)
+                       + w10 * pos_at(i, idx10)
+                       + w11 * pos_at(i, idx11);
+            }
+        }
+    }
+
+    std::vector<float> merged_pos_embd(grid_h * grid_w * n_embd);
+    int token = 0;
+    for (int y = 0; y < grid_h; y += merge_size) {
+        for (int x = 0; x < grid_w; x += merge_size) {
+            for (int dy = 0; dy < merge_size; ++dy) {
+                for (int dx = 0; dx < merge_size; ++dx) {
+                    const float * src = patch_pos_embd.data() + ((y + dy) * grid_w + (x + dx)) * n_embd;
+                    float * dst = merged_pos_embd.data() + token * n_embd;
+                    std::copy_n(src, n_embd, dst);
+                    token++;
+                }
+            }
+        }
+    }
+
+    return merged_pos_embd;
+}
+
+struct qwen3vl_vision_rope_tables {
+    std::vector<float> cos;
+    std::vector<float> sin;
+};
+
+static qwen3vl_vision_rope_tables qwen3vl_build_vision_rope_tables(
+        const int grid_h,
+        const int grid_w,
+        const int merge_size,
+        const int head_dim,
+        const float theta_base = 10000.0f) {
+    GGML_ASSERT(grid_h > 0);
+    GGML_ASSERT(grid_w > 0);
+    GGML_ASSERT(merge_size > 0);
+    GGML_ASSERT(grid_h % merge_size == 0);
+    GGML_ASSERT(grid_w % merge_size == 0);
+    GGML_ASSERT(head_dim > 0 && head_dim % 2 == 0);
+
+    const int rope_dim = head_dim / 2;
+    GGML_ASSERT(rope_dim % 2 == 0);
+    const int axis_dim = rope_dim / 2;
+    const int n_tokens = grid_h * grid_w;
+
+    std::vector<float> inv_freq(axis_dim);
+    for (int i = 0; i < axis_dim; ++i) {
+        inv_freq[i] = std::pow(theta_base, -2.0f * i / rope_dim);
+    }
+
+    qwen3vl_vision_rope_tables tables;
+    tables.cos.resize((size_t) rope_dim * n_tokens);
+    tables.sin.resize((size_t) rope_dim * n_tokens);
+
+    int token = 0;
+    for (int y = 0; y < grid_h; y += merge_size) {
+        for (int x = 0; x < grid_w; x += merge_size) {
+            for (int dy = 0; dy < merge_size; ++dy) {
+                for (int dx = 0; dx < merge_size; ++dx) {
+                    const float row = (float) (y + dy);
+                    const float col = (float) (x + dx);
+                    float * cos_dst = tables.cos.data() + (size_t) token * rope_dim;
+                    float * sin_dst = tables.sin.data() + (size_t) token * rope_dim;
+                    for (int i = 0; i < axis_dim; ++i) {
+                        const float row_theta = row * inv_freq[i];
+                        const float col_theta = col * inv_freq[i];
+                        cos_dst[i]            = std::cos(row_theta);
+                        sin_dst[i]            = std::sin(row_theta);
+                        cos_dst[axis_dim + i] = std::cos(col_theta);
+                        sin_dst[axis_dim + i] = std::sin(col_theta);
+                    }
+                    token++;
+                }
+            }
+        }
+    }
+
+    GGML_ASSERT(token == n_tokens);
+    return tables;
+}
+
 
 struct clip_ctx {
     clip_model model;
@@ -4179,6 +4338,20 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
         }
         set_input_f32("inp_raw", inp_raw);
 
+        if (ctx->model.proj_type == PROJECTOR_TYPE_QWEN3VL) {
+            const int merge_ratio = hparams.n_merge;
+            const int pw = image_size_width  / patch_size;
+            const int ph = image_size_height / patch_size;
+            std::vector<float> learned_pos_embd = qwen3vl_fast_pos_embed_interpolate(
+                ctx->model.position_embeddings,
+                ph,
+                pw,
+                merge_ratio);
+            if (ggml_graph_get_tensor(gf, "learned_pos_embd") != nullptr) {
+                set_input_f32("learned_pos_embd", learned_pos_embd);
+            }
+        }
+
     } else if (!(ctx->proj_type() == PROJECTOR_TYPE_QWEN3TTS_GEN && params->gen_process == CLIP_GEN_PROCESS_GEN_WAV)) {
         // audio input, code2wav is not here: its only input is "inp_codes", set in the switch below
         GGML_ASSERT(imgs.entries.size() == 1);
@@ -4328,8 +4501,21 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
                 set_input_i32("merger_ds_idx_2", m_ds_2);
                 set_input_i32("merger_ds_idx_3", m_ds_3);
             } break;
-        case PROJECTOR_TYPE_QWEN2VL:
         case PROJECTOR_TYPE_QWEN3VL:
+            {
+                const int merge_ratio = hparams.n_merge;
+                const int pw = image_size_width  / patch_size;
+                const int ph = image_size_height / patch_size;
+                qwen3vl_vision_rope_tables rope_tables = qwen3vl_build_vision_rope_tables(
+                    ph, pw, merge_ratio, hparams.n_embd / hparams.n_head);
+                set_input_f32("rope_cos", rope_tables.cos);
+                set_input_f32("rope_sin", rope_tables.sin);
+                std::vector<float> ln_one = { 1.0f };
+                std::vector<float> ln_eps = { hparams.eps };
+                set_input_f32("ln_one", ln_one);
+                set_input_f32("ln_eps", ln_eps);
+            } break;
+        case PROJECTOR_TYPE_QWEN2VL:
         case PROJECTOR_TYPE_GLM4V:
             {
                 const int merge_ratio = hparams.n_merge;
