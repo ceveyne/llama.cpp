@@ -304,10 +304,14 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    const int n_seq_max = llama_max_parallel_sequences();
-    if (params.n_parallel == 1) {
-        params.kv_unified = true;
-        params.n_parallel = n_seq_max;
+    // Rerank prompts are short (one query + one document per call, one
+    // sequence at a time - never batched/parallel across documents). Do not
+    // fall through to the model's full training context (n_ctx=0 means "use
+    // n_ctx_train", which is 262144 for Qwen3-VL): that alone allocates a
+    // KV cache in the tens of GB for a prompt that is typically a few
+    // hundred tokens. --ctx-size still overrides this explicitly.
+    if (params.n_ctx == 0) {
+        params.n_ctx = 8192;
     }
     if (params.n_batch < params.n_ctx) {
         params.n_batch = params.n_ctx;
