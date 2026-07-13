@@ -221,8 +221,8 @@ class Qwen3Model(Qwen2Model):
             self.gguf_writer.add_chat_template([{
                 "name": "rerank",
                 "template": "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n"
-                            "<|im_start|>user\n<Instruct>: Given a web search query, retrieve relevant passages that answer the query\n<Query>: {query}\n<Document>: {document}<|im_end|>\n"
-                            "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                            "<|im_start|>user\n<Instruct>: {instruction}<Query>:{query}\n<Document>:{document}<|im_end|>\n"
+                            "<|im_start|>assistant\n"
             }])
 
     def _get_cls_out_tensor(self, data_torch: Tensor) -> Tensor:

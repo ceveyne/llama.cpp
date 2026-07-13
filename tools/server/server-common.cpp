@@ -1552,6 +1552,9 @@ server_tokens format_prompt_rerank(
 
     if (rerank_prompt != nullptr) {
         std::string prompt = rerank_prompt;
+        // the server /rerank API does not (yet) expose a custom instruction field;
+        // fall back to the reranker's own default instruction text
+        string_replace_all(prompt, "{instruction}", "Given a search query, retrieve relevant candidates that answer the query.");
         string_replace_all(prompt, "{query}"   , query);
         string_replace_all(prompt, "{document}", doc  );
         server_tokens tokens = tokenize_input_subprompt(vocab, mctx, prompt, false, true);

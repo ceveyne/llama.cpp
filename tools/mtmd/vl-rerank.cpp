@@ -1,5 +1,4 @@
 #include "arg.h"
-#include "chat.h"
 #include "common.h"
 #include "llama.h"
 #include "log.h"
@@ -18,20 +17,19 @@
 
 using json = nlohmann::ordered_json;
 
-// Reference prompt/scoring behavior verified against:
-//   - Qwen3-VL-Reranker-8B/chat_template.jinja (default template, no <think> block)
-//   - Qwen3-VL-Reranker-8B/scripts/qwen3_vl_reranker.py (format_mm_instruction, process)
-//   - Qwen3-VL-Reranker-8B/1_LogitScore/config.json ("yes"/"no" token ids)
-// Do not change the system prompt, the "<Instruct>:"/"<Query>:"/"<Document>:"
-// markers, or the NULL fallback text without re-checking that reference.
+// Prompt construction uses the model's own GGUF-baked "rerank" chat template
+// (written by conversion/qwen.py for Qwen3-(VL-)Reranker checkpoints), fetched
+// via llama_model_chat_template(model, "rerank") and filled in with simple
+// {instruction}/{query}/{document} substitution - the exact same mechanism
+// tools/server/server-common.cpp's format_prompt_rerank() uses. This is the
+// single source of truth for the reranker prompt; do not reimplement prompt
+// construction here. If the prompt is wrong, fix the template in
+// conversion/qwen.py (and re-convert), not this file.
 
 namespace {
 
 const char *      DEFAULT_INSTRUCTION =
     "Given a search query, retrieve relevant candidates that answer the query.";
-const char *      SYSTEM_PROMPT =
-    "Judge whether the Document meets the requirements based on the Query and the Instruct provided. "
-    "Note that the answer can only be \"yes\" or \"no\".";
 const std::string QWEN_IMAGE_MARKER = "<|vision_start|><|image_pad|><|vision_end|>";
 
 struct vl_side {
@@ -120,60 +118,35 @@ vl_rerank_request parse_request(const std::string & inputs_json) {
     return request;
 }
 
-// Builds the exact (system, user) message pair the reference Python implementation
-// constructs in Qwen3VLReranker.format_mm_instruction(), rendered through the
-// model's own default chat template (mirrors vl-embedding.cpp's build_conversation,
-// not the separately baked "rerank" named chat template, which adds an unused
-// <think> block for this VL variant).
-std::vector<common_chat_msg> build_pair_messages(const std::string & instruction, const vl_side & query,
-                                                 const vl_side & doc) {
-    std::vector<common_chat_msg> messages;
-
-    common_chat_msg system;
-    system.role    = "system";
-    system.content = SYSTEM_PROMPT;
-    messages.push_back(std::move(system));
-
-    common_chat_msg user;
-    user.role = "user";
-
-    user.content_parts.push_back({ "text", "<Instruct>: " + instruction });
-    user.content_parts.push_back({ "text", "<Query>:" });
-    if (has_image(query)) {
-        user.content_parts.push_back({ "media_marker", QWEN_IMAGE_MARKER });
+// Builds the {query}/{document} substitution value for one side of the pair:
+// an optional image marker followed by text, or the literal "NULL" fallback
+// when neither text nor image is present - matching Qwen3VLReranker.format_mm_content()
+// in the reference script.
+std::string build_side_text(const vl_side & side) {
+    std::string result;
+    if (has_image(side)) {
+        result += QWEN_IMAGE_MARKER;
     }
-    if (has_text(query)) {
-        user.content_parts.push_back({ "text", *query.text });
-    } else if (!has_image(query)) {
-        user.content_parts.push_back({ "text", "NULL" });
+    if (has_text(side)) {
+        result += *side.text;
+    } else if (!has_image(side)) {
+        result += "NULL";
     }
-
-    user.content_parts.push_back({ "text", "\n<Document>:" });
-    if (has_image(doc)) {
-        user.content_parts.push_back({ "media_marker", QWEN_IMAGE_MARKER });
-    }
-    if (has_text(doc)) {
-        user.content_parts.push_back({ "text", *doc.text });
-    } else if (!has_image(doc)) {
-        user.content_parts.push_back({ "text", "NULL" });
-    }
-
-    messages.push_back(std::move(user));
-    return messages;
+    return result;
 }
 
-std::string format_pair_prompt(const common_chat_templates * tmpls, const std::string & instruction,
-                               const vl_side & query, const vl_side & doc) {
-    common_chat_templates_inputs chat_inputs;
-    chat_inputs.use_jinja             = true;
-    chat_inputs.messages              = build_pair_messages(instruction, query, doc);
-    chat_inputs.add_generation_prompt = true;
-    chat_inputs.add_bos               = true;
-    // Must NOT append an eos token: the classifier score is read from the hidden
-    // state of the very last prompt token (right after "assistant\n"), matching
-    // Qwen3VLReranker.compute_scores() in the reference script.
-    chat_inputs.add_eos = false;
-    return common_chat_templates_apply(tmpls, chat_inputs).prompt;
+std::string format_pair_prompt(const llama_model * model, const std::string & instruction, const vl_side & query,
+                               const vl_side & doc) {
+    const char * rerank_template = llama_model_chat_template(model, "rerank");
+    if (rerank_template == nullptr) {
+        throw std::runtime_error("model does not provide a 'rerank' chat template; is this a reranker GGUF?");
+    }
+
+    std::string prompt = rerank_template;
+    string_replace_all(prompt, "{instruction}", instruction);
+    string_replace_all(prompt, "{query}", build_side_text(query));
+    string_replace_all(prompt, "{document}", build_side_text(doc));
+    return prompt;
 }
 
 std::string rewrite_multimodal_markers(std::string prompt) {
@@ -342,14 +315,6 @@ int main(int argc, char ** argv) {
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
-    common_chat_templates_ptr tmpls;
-    try {
-        tmpls = common_chat_templates_init(model, "");
-    } catch (const std::exception &) {
-        LOG_ERR("%s: failed to initialize chat template for the model\n", __func__);
-        return 1;
-    }
-
     mtmd::context_ptr ctx_vision;
     if (needs_vision) {
         mtmd_context_params mparams = mtmd_context_params_default();
@@ -372,7 +337,7 @@ int main(int argc, char ** argv) {
 
     try {
         for (const auto & doc : request.documents) {
-            const std::string prompt = format_pair_prompt(tmpls.get(), request.instruction, request.query, doc);
+            const std::string prompt = format_pair_prompt(model, request.instruction, request.query, doc);
 
             if (params.verbose_prompt) {
                 LOG_INF("%s: formatted prompt: %s\n", __func__, prompt.c_str());
