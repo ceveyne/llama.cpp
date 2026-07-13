@@ -107,6 +107,45 @@ The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-or
 - [Completions](docs/completions.md)
 - [Models](docs/models.md)
 
+
+## [`llama-vl-embedding`](tools/mtmd/vl-embedding.cpp) / [`llama-vl-rerank`](tools/mtmd/vl-rerank.cpp)
+
+#### Fork-specific CLI tools for Qwen3-VL multimodal embedding and reranking (text, image, or image+text inputs), built on `mtmd`.
+
+- <details>
+    <summary>Embed text and/or images (Qwen3-VL-Embedding)</summary>
+
+    ```bash
+    llama-vl-embedding -m Qwen3-VL-Embedding.gguf --mmproj mmproj.gguf --pooling last \
+      --inputs '[{"text": "a photo of a cat"}, {"image": "/path/to/cat.jpg"}]'
+    ```
+
+    </details>
+
+- <details>
+    <summary>Rerank documents against a query (Qwen3-VL-Reranker)</summary>
+
+    Requires a reranker GGUF converted with the classifier head
+    (`pooling_type=rank`, `cls_out` tensor with `yes`/`no` labels — produced
+    automatically by `convert_hf_to_gguf.py` for `Qwen3-Reranker`/`Qwen3-VL-Reranker`
+    checkpoints). The query and each document may contain `text`, `image`, or both.
+
+    ```bash
+    llama-vl-rerank -m Qwen3-VL-Reranker.gguf --mmproj mmproj.gguf --embd-output-format json \
+      --inputs '{
+        "instruction": "Given a search query, retrieve relevant candidates that answer the query.",
+        "query": {"text": "a photo of a cat"},
+        "documents": [
+          {"text": "a fluffy orange cat sleeping on a couch"},
+          {"image": "/path/to/dog.jpg"}
+        ]
+      }'
+    # [0.83, 0.02]
+    ```
+
+    </details>
+
+
 ## Contributing
 
 - Contributors can open PRs
