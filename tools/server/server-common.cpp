@@ -1544,22 +1544,58 @@ server_tokens format_prompt_rerank(
         const struct llama_model * model,
         const struct llama_vocab * vocab,
         mtmd_context * mctx,
-        const std::string & query,
-        const std::string & doc) {
+        const std::string & media_path,
+        const std::string & query_text,
+        const std::string & query_image_url,
+        const std::string & doc_text,
+        const std::string & doc_image_url) {
     server_tokens result = {};
 
     const char * rerank_prompt = llama_model_chat_template(model, "rerank");
 
     if (rerank_prompt != nullptr) {
+        const bool has_query_image = !query_image_url.empty();
+        const bool has_doc_image   = !doc_image_url.empty();
+
+        if ((has_query_image || has_doc_image) && mctx == nullptr) {
+            throw std::runtime_error(
+                "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
+        }
+
+        // collects raw image bytes in the same order the markers below are
+        // appended to the prompt string, matching what process_mtmd_prompt()
+        // expects
+        std::vector<raw_buffer> files;
+        auto build_side = [&](const std::string & text, const std::string & image_url) {
+            std::string side;
+            if (!image_url.empty()) {
+                handle_media(files, image_url, media_path, true);
+                side += get_media_marker();
+            }
+            if (!text.empty()) {
+                side += text;
+            } else if (image_url.empty()) {
+                side += "NULL";
+            }
+            return side;
+        };
+
         std::string prompt = rerank_prompt;
         // the server /rerank API does not (yet) expose a custom instruction field;
         // fall back to the reranker's own default instruction text
         string_replace_all(prompt, "{instruction}", "Given a search query, retrieve relevant candidates that answer the query.");
-        string_replace_all(prompt, "{query}"   , query);
-        string_replace_all(prompt, "{document}", doc  );
-        server_tokens tokens = tokenize_input_subprompt(vocab, mctx, prompt, false, true);
-        result.push_back(tokens);
+        string_replace_all(prompt, "{query}"   , build_side(query_text, query_image_url));
+        string_replace_all(prompt, "{document}", build_side(doc_text, doc_image_url));
+
+        if (!files.empty()) {
+            result = process_mtmd_prompt(mctx, prompt, files);
+        } else {
+            server_tokens tokens = tokenize_input_subprompt(vocab, mctx, prompt, false, true);
+            result.push_back(tokens);
+        }
     } else {
+        const std::string & query = query_text;
+        const std::string & doc   = doc_text;
         // Get EOS token - use SEP token as fallback if EOS is not available
         server_tokens query_tokens = tokenize_input_subprompt(vocab, mctx, query, false, false);
         server_tokens doc_tokens   = tokenize_input_subprompt(vocab, mctx, doc,   false, false);

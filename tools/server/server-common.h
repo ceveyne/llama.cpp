@@ -367,9 +367,15 @@ llama_tokens format_prompt_infill(
         const llama_tokens & tokens_prompt);
 
 // format rerank task: [BOS]query[EOS][SEP]doc[EOS].
+// query_image_url/doc_image_url may be empty (no image for that side) or any
+// URL handle_media() understands (http(s)://, file:// with --media-path,
+// data:image/...;base64,..., or raw base64).
 server_tokens format_prompt_rerank(
         const struct llama_model * model,
         const struct llama_vocab * vocab,
         mtmd_context * mctx,
-        const std::string & query,
-        const std::string & doc);
+        const std::string & media_path,
+        const std::string & query_text,
+        const std::string & query_image_url,
+        const std::string & doc_text,
+        const std::string & doc_image_url);

@@ -4930,11 +4930,27 @@ void server_routes::init_routes() {
         // TEI: https://huggingface.github.io/text-embeddings-inference/#/Text%20Embeddings%20Inference/rerank
         bool is_tei_format = body.contains("texts");
 
-        json query;
+        // a rerank "side" (query or one document) is either a plain string,
+        // or an object { "text": "...", "image": "<url>" } - "image" may be
+        // any URL handle_media() understands (http(s)://, file:// with
+        // --media-path, data:image/...;base64,..., or raw base64)
+        auto parse_side = [&](const json & side, const char * label) -> std::pair<std::string, std::string> {
+            if (side.is_string()) {
+                return { side.get<std::string>(), std::string() };
+            }
+            if (side.is_object()) {
+                return { json_value(side, "text", std::string()), json_value(side, "image", std::string()) };
+            }
+            throw std::invalid_argument(std::string(label) + " must be a string or an object with \"text\"/\"image\"");
+        };
+
+        std::string query_text;
+        std::string query_image_url;
         if (body.count("query") == 1) {
-            query = body.at("query");
-            if (!query.is_string()) {
-                res->error(format_error_response("\"query\" must be a string", ERROR_TYPE_INVALID_REQUEST));
+            try {
+                std::tie(query_text, query_image_url) = parse_side(body.at("query"), "\"query\"");
+            } catch (const std::exception & e) {
+                res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
                 return res;
             }
         } else {
@@ -4942,23 +4958,40 @@ void server_routes::init_routes() {
             return res;
         }
 
-        std::vector<std::string> documents = json_value(body, "documents",
-                                             json_value(body, "texts", std::vector<std::string>()));
-        if (documents.empty()) {
-            res->error(format_error_response("\"documents\" must be a non-empty string array", ERROR_TYPE_INVALID_REQUEST));
+        json documents_json = json_value(body, "documents", json_value(body, "texts", json()));
+        if (!documents_json.is_array() || documents_json.empty()) {
+            res->error(format_error_response("\"documents\" must be a non-empty array", ERROR_TYPE_INVALID_REQUEST));
             return res;
         }
 
-        int top_n = json_value(body, "top_n", (int)documents.size());
+        std::vector<std::string> doc_texts;
+        std::vector<std::string> doc_image_urls;
+        doc_texts.reserve(documents_json.size());
+        doc_image_urls.reserve(documents_json.size());
+        try {
+            for (const auto & d : documents_json) {
+                auto parsed = parse_side(d, "each \"documents\" entry");
+                doc_texts.push_back(std::move(parsed.first));
+                doc_image_urls.push_back(std::move(parsed.second));
+            }
+        } catch (const std::exception & e) {
+            res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+
+        int top_n = json_value(body, "top_n", (int)doc_texts.size());
 
         // create and queue the task
         json responses = json::array();
         auto & rd = res->rd;
         {
             std::vector<server_task> tasks;
-            tasks.reserve(documents.size());
-            for (size_t i = 0; i < documents.size(); i++) {
-                auto tmp = format_prompt_rerank(ctx_server.model_tgt, ctx_server.vocab, ctx_server.mctx, query, documents[i]);
+            tasks.reserve(doc_texts.size());
+            for (size_t i = 0; i < doc_texts.size(); i++) {
+                auto tmp = format_prompt_rerank(ctx_server.model_tgt, ctx_server.vocab, ctx_server.mctx,
+                                                 ctx_server.chat_params.media_path,
+                                                 query_text, query_image_url,
+                                                 doc_texts[i], doc_image_urls[i]);
                 server_task task = server_task(SERVER_TASK_TYPE_RERANK);
                 task.id     = rd.get_new_id();
                 task.tokens = std::move(tmp);
@@ -4989,7 +5022,7 @@ void server_routes::init_routes() {
             meta->model_name,
             responses,
             is_tei_format,
-            documents,
+            doc_texts,
             top_n);
 
         res->ok(root);
