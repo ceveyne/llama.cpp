@@ -143,6 +143,12 @@ The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-or
     # [0.83, 0.02]
     ```
 
+    `llama-server`'s native `/rerank` endpoint (`--reranking`) also accepts image/mixed
+    documents the same way: `"query"`/each `"documents[]"` entry may be an object
+    `{"text": ..., "image": <url>}` instead of a plain string, where `<url>` is
+    anything `handle_media()` accepts elsewhere in the server (`http(s)://`,
+    `file://` with `--media-path`, `data:image/...;base64,...`, or raw base64).
+
     </details>
 
 
