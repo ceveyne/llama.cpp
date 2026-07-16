@@ -2883,6 +2883,8 @@ private:
 #endif
 
                 if (ok) {
+                    llama_synchronize(ctx_tgt);
+
                     // move the head of the batch forward with the number of tokens we just processed
                     off_next = off + n_tokens;
 
