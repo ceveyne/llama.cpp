@@ -4931,6 +4931,14 @@ void server_routes::init_routes() {
         // Jina: https://jina.ai/reranker/
         // TEI: https://huggingface.github.io/text-embeddings-inference/#/Text%20Embeddings%20Inference/rerank
         bool is_tei_format = body.contains("texts");
+        std::string instruction = "Given a search query, retrieve relevant candidates that answer the query.";
+        if (body.contains("instruction") && !body.at("instruction").is_null()) {
+            if (!body.at("instruction").is_string()) {
+                res->error(format_error_response("\"instruction\" must be a string", ERROR_TYPE_INVALID_REQUEST));
+                return res;
+            }
+            instruction = body.at("instruction").get<std::string>();
+        }
 
         // a rerank "side" (query or one document) is either a plain string,
         // or an object { "text": "...", "image": "<url>" } - "image" may be
@@ -4993,7 +5001,7 @@ void server_routes::init_routes() {
                 auto tmp = format_prompt_rerank(ctx_server.model_tgt, ctx_server.vocab, ctx_server.mctx,
                                                  ctx_server.chat_params.media_path,
                                                  query_text, query_image_url,
-                                                 doc_texts[i], doc_image_urls[i]);
+                                                 doc_texts[i], doc_image_urls[i], instruction);
                 server_task task = server_task(SERVER_TASK_TYPE_RERANK);
                 task.id     = rd.get_new_id();
                 task.tokens = std::move(tmp);

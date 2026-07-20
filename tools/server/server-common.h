@@ -378,4 +378,5 @@ server_tokens format_prompt_rerank(
         const std::string & query_text,
         const std::string & query_image_url,
         const std::string & doc_text,
-        const std::string & doc_image_url);
+        const std::string & doc_image_url,
+        const std::string & instruction);
