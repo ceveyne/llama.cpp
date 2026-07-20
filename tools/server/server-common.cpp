@@ -1558,7 +1558,8 @@ server_tokens format_prompt_rerank(
         const std::string & query_text,
         const std::string & query_image_url,
         const std::string & doc_text,
-        const std::string & doc_image_url) {
+        const std::string & doc_image_url,
+        const std::string & instruction) {
     server_tokens result = {};
 
     const char * rerank_prompt = llama_model_chat_template(model, "rerank");
@@ -1591,9 +1592,7 @@ server_tokens format_prompt_rerank(
         };
 
         std::string prompt = rerank_prompt;
-        // the server /rerank API does not (yet) expose a custom instruction field;
-        // fall back to the reranker's own default instruction text
-        string_replace_all(prompt, "{instruction}", "Given a search query, retrieve relevant candidates that answer the query.");
+        string_replace_all(prompt, "{instruction}", instruction);
         string_replace_all(prompt, "{query}"   , build_side(query_text, query_image_url));
         string_replace_all(prompt, "{document}", build_side(doc_text, doc_image_url));
 

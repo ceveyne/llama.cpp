@@ -64,6 +64,18 @@ def test_rerank_tei_format():
     assert least_relevant["index"] == 3
 
 
+def test_rerank_accepts_custom_instruction():
+    global server
+    server.start()
+    res = server.make_request("POST", "/rerank", data={
+        "instruction": "Retrieve candidates relevant to this query.",
+        "query": "Machine learning is",
+        "documents": TEST_DOCUMENTS,
+    })
+    assert res.status_code == 200
+    assert len(res.body["results"]) == 4
+
+
 @pytest.mark.parametrize("documents", [
     [],
     None,
@@ -76,6 +88,18 @@ def test_invalid_rerank_req(documents):
     res = server.make_request("POST", "/rerank", data={
         "query": "Machine learning is",
         "documents": documents,
+    })
+    assert res.status_code == 400
+    assert "error" in res.body
+
+
+def test_invalid_rerank_instruction():
+    global server
+    server.start()
+    res = server.make_request("POST", "/rerank", data={
+        "instruction": 123,
+        "query": "Machine learning is",
+        "documents": TEST_DOCUMENTS,
     })
     assert res.status_code == 400
     assert "error" in res.body
