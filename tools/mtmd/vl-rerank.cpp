@@ -219,6 +219,7 @@ float score_multimodal(mtmd_context * ctx_vision, llama_context * ctx, const std
 
     mtmd_input_text text;
     text.text          = prompt_with_marker.c_str();
+    text.text_len      = prompt_with_marker.size();
     text.add_special   = true;
     text.parse_special = true;
 
