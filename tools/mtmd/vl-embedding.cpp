@@ -338,6 +338,10 @@ std::string format_input_prompt(const common_chat_templates * tmpls, const vl_in
     chat_inputs.add_generation_prompt = true;
     chat_inputs.add_bos               = true;
     chat_inputs.add_eos               = true;
+    // pure prompt generation: skip the differential autoparser, which probes
+    // the template with synthetic messages (e.g. content=null + tool_calls)
+    // that the Qwen3-VL template contract does not cover
+    chat_inputs.force_pure_content    = true;
     return common_chat_templates_apply(tmpls, chat_inputs).prompt;
 }
 
@@ -460,6 +464,7 @@ embedding_result encode_multimodal(mtmd_context *        ctx_vision,
 
     mtmd_input_text text;
     text.text          = prompt_with_marker.c_str();
+    text.text_len      = prompt_with_marker.size();
     text.add_special   = true;
     text.parse_special = true;
 
