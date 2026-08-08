@@ -84,7 +84,7 @@ ggml_cgraph * clip_graph_qwen3vl::build() {
         ggml_tensor * mean = ggml_mean(ctx0, cur);
         ggml_tensor * centered = ggml_sub(ctx0, cur, mean);
         ggml_tensor * var = ggml_scale(ctx0, ggml_sum_rows(ctx0, ggml_sqr(ctx0, centered)), 1.0f / cur->ne[0]);
-        ggml_tensor * denom = ggml_sqrt(ctx0, ggml_add1(ctx0, var, ln_eps));
+        ggml_tensor * denom = ggml_sqrt(ctx0, ggml_add(ctx0, var, ln_eps));
         ggml_tensor * inv_std = ggml_div(ctx0, ggml_repeat(ctx0, ln_one, denom), denom);
         cur = ggml_mul(ctx0, centered, inv_std);
 
